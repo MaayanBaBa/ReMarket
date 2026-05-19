@@ -9,11 +9,18 @@ const socketIo = require("socket.io");
 
 const app = express();
 const server = http.createServer(app);
+
+const allowedOrigins = (process.env.CLIENT_URL || "http://localhost:3000")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
 const io = socketIo(server, {
   cors: {
-    origin: process.env.CLIENT_URL || "http://localhost:3000",
-    methods: ["GET", "POST"]
-  }
+    origin: allowedOrigins.length === 1 ? allowedOrigins[0] : allowedOrigins,
+    methods: ["GET", "POST"],
+    credentials: true,
+  },
 });
 
 const uploadsDir = path.join(__dirname, "uploads");
@@ -21,9 +28,31 @@ if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
-app.use(cors());
+app.use(
+  cors({
+    origin(origin, cb) {
+      if (!origin) return cb(null, true);
+      if (allowedOrigins.includes(origin)) return cb(null, true);
+      return cb(null, true); // permissive default for now; tighten later if needed
+    },
+    credentials: true,
+  })
+);
 app.use(express.json());
 app.use("/uploads", express.static(uploadsDir));
+
+/** Block requests with a clear error when MongoDB isn't connected (instead of 10s buffering) */
+app.use((req, res, next) => {
+  // 1 = connected, 2 = connecting; let real APIs through only when connected
+  if (mongoose.connection.readyState === 1) return next();
+  // health/root endpoints still work
+  if (req.path === "/" || req.path === "/health") return next();
+  return res.status(503).json({
+    message:
+      "השרת מחובר, אבל אין חיבור פעיל למסד הנתונים. בדקי MONGO_URI ב-Render והרשאות IP ב-MongoDB Atlas.",
+    code: "DB_NOT_CONNECTED",
+  });
+});
 app.use("/users", require("./routes/userRoutes"));
 app.use("/categories", require("./routes/categoryRoutes"));
 app.use("/products", require("./routes/productRoutes"));
@@ -50,16 +79,40 @@ async function migrateSingleMainAdminFlag() {
   }
 }
 
-mongoose.connect(process.env.MONGO_URI || "mongodb://localhost:27017/ReMarket")
+const MONGO_URI = process.env.MONGO_URI || "mongodb://localhost:27017/ReMarket";
+// Fail fast instead of Mongoose's default 10s buffering, so the API returns a real error
+mongoose.set("bufferTimeoutMS", 2000);
+
+mongoose
+  .connect(MONGO_URI, {
+    serverSelectionTimeoutMS: 10000,
+  })
   .then(migrateSingleMainAdminFlag)
   .then(ensureDefaultCategories)
   .then(ensureProductQuantity)
   .then(ensureMessageReadAt)
   .then(() => console.log("MongoDB connected"))
-  .catch(err => console.log(err));
+  .catch((err) => {
+    console.error("MongoDB connection error:", err?.message || err);
+  });
+
+mongoose.connection.on("disconnected", () => {
+  console.warn("MongoDB disconnected");
+});
+mongoose.connection.on("reconnected", () => {
+  console.log("MongoDB reconnected");
+});
 
 app.get("/", (req, res) => {
   res.send("Server is running");
+});
+
+app.get("/health", (req, res) => {
+  res.json({
+    status: "ok",
+    db: mongoose.connection.readyState === 1 ? "connected" : "disconnected",
+    dbState: mongoose.connection.readyState,
+  });
 });
 
 const { initChatIo } = require("./socket/chatHub");
@@ -79,6 +132,7 @@ app.use((err, req, res, _next) => {
   res.status(500).json({ message: "שגיאת שרת" });
 });
 
-server.listen(5000, () => {
-  console.log("Server running on port 5000");
+const PORT = Number(process.env.PORT) || 5000;
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
