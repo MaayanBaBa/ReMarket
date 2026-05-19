@@ -1,9 +1,10 @@
 import axios from 'axios'
+import { SERVER_ORIGIN } from '../config/env'
+
+export { SERVER_ORIGIN }
 
 // Matches server/server.js (no "/api" prefix)
-export const SERVER_ORIGIN = 'http://localhost:5000'
 const API = axios.create({ baseURL: SERVER_ORIGIN })
-
 /** תמונה מהשרת (/uploads/...), קישור חיצוני, או placeholder */
 export function resolveProductImageUrl(image, fallbackSize = '500x400') {
   if (!image) {
